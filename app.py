@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (中文与小样本强化版)")
-st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换、主成分降维与随机森林等多种算法。")
+st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换、主成分降维与轻量加速算法。")
 
 # ----------------- 侧边栏：文件上传与参数选择 -----------------
 with st.sidebar:
@@ -33,7 +33,6 @@ with st.sidebar:
     df = None
     try:
         if uploaded_file.name.lower().endswith('.csv'):
-            # 解决中文 CSV 编码乱码与报错问题（按顺序尝试常见中文编码）
             for enc in ['utf-8', 'gb18030', 'gbk', 'utf-8-sig']:
                 try:
                     uploaded_file.seek(0)
@@ -72,7 +71,6 @@ with st.sidebar:
         st.error("识别到的数值列不足 2 列，请检查表格是否包含纯文本或缺失过多。")
         st.stop()
 
-    # 智能定位井号列（支持中英文字符串搜索）
     well_col_keywords = ['井号', 'well', 'id', '井名', '井号名称']
     default_id_idx = 0
     for idx, col in enumerate(all_cols):
@@ -81,13 +79,11 @@ with st.sidebar:
             break
     id_col = st.selectbox("井号 / ID 列", options=all_cols, index=default_id_idx)
     
-    # 智能推断 EUR 列（涵盖中英文常用列名）
     eur_keywords = ['eur', '储量', '累产', '可采', '最终可采', '估算可采']
     eur_candidates = [c for c in numeric_cols if any(k in c.lower() for k in eur_keywords)]
     default_target_idx = numeric_cols.index(eur_candidates[0]) if eur_candidates else len(numeric_cols) - 1
     target_col = st.selectbox("目标变量 (EUR / 累产)", options=numeric_cols, index=default_target_idx)
 
-    # 备选特征排查
     available_features = [c for c in numeric_cols if c != target_col and c != id_col]
     selected_features = st.multiselect("参与建模的地质/工程特征", options=available_features, default=available_features)
 
@@ -172,7 +168,7 @@ with tab2:
         model_name = st.selectbox(
             "选择回归算法",
             [
-                "随机森林回归 (Random Forest - 树集成抗噪)",
+                "随机森林回归 (Random Forest - 轻量加速版)",
                 "Lasso 回归 (强稀疏降维，适合小样本冗余特征)",
                 "岭回归 (RidgeCV - 抗多重共线性稳定型)",
                 "弹性网络 (ElasticNetCV - 平衡综合型)",
@@ -181,7 +177,7 @@ with tab2:
         )
     with col_info:
         if "随机森林" in model_name:
-            st.info("📌 **随机森林机制**：通过构建多棵受约束决策树进行投票平均，具备较强的抗噪和非线性拟合能力。已针对小样本限制最大树深，防止过拟合。")
+            st.info("📌 **随机森林机制**：已配置全核多线程并行（n_jobs=-1）与轻量级树结构，秒级计算且抗过拟合。")
         elif "Lasso" in model_name:
             st.info("📌 **Lasso 机制**：加入 L1 正则化惩罚，会自动将冗余和共线性特征的权重压缩至 0，防止过拟合。")
         elif "岭回归" in model_name:
@@ -222,11 +218,16 @@ with tab2:
             X_tr_sc = pca.fit_transform(X_tr_sc)
             X_te_sc = pca.transform(X_te_sc)
 
-        # 4. 模型配置
+        # 4. 模型配置（随机森林已加速优化）
         inner_cv = min(3, len(X_tr))
         if "随机森林" in model_name:
-            # max_depth 控制在 3，min_samples_split 控制在 2，避免极小样本下树完全过拟合叶节点
-            m = RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_split=2, random_state=42)
+            m = RandomForestRegressor(
+                n_estimators=30, 
+                max_depth=3, 
+                min_samples_split=2, 
+                n_jobs=-1, 
+                random_state=42
+            )
         elif "Lasso" in model_name:
             m = LassoCV(cv=inner_cv, random_state=42)
         elif "岭回归" in model_name:
@@ -264,7 +265,7 @@ with tab2:
     m3.metric("平均相对误差 (MAPE)", f"{mape:.1f}%")
     m4.metric(f"符合率 (≤±{int(error_threshold*100)}%)", f"{accuracy_rate:.1f}%")
 
-    # 绘制实测-预测交会图
+    # 实测-预测对比表
     cross_df = pd.DataFrame({
         "井号": well_ids,
         "实测 EUR": y,
@@ -273,6 +274,7 @@ with tab2:
         "检验结论": ["合格" if e <= error_threshold else "超标" for e in rel_errors]
     })
 
+    # 绘制交会散点图（已剔除散点上文字显示）
     max_v = max(np.max(y), np.max(y_preds)) * 1.15
     fig_eval = go.Figure()
     fig_eval.add_trace(go.Scatter(x=[0, max_v], y=[0, max_v], mode='lines', name='1:1 理想线', line=dict(color='gray', dash='dash')))
@@ -284,11 +286,11 @@ with tab2:
         fig_eval.add_trace(go.Scatter(
             x=sub_d["实测 EUR"],
             y=sub_d["预测 EUR"],
-            mode='markers+text',
-            text=sub_d["井号"],
-            textposition="top center",
+            mode='markers',  # 仅保留散点标记，不带文字标签
             name=f"{res}井位",
-            marker=dict(size=11, color=c, opacity=0.85)
+            marker=dict(size=10, color=c, opacity=0.85),
+            customdata=sub_d[["井号", "相对误差(%)"]],
+            hovertemplate="<b>井号: %{customdata[0]}</b><br>实测 EUR: %{x:.4f}<br>预测 EUR: %{y:.4f}<br>相对误差: %{customdata[1]:.2f}%<extra></extra>"
         ))
 
     fig_eval.update_layout(
@@ -357,7 +359,7 @@ with tab4:
     y_full_fit = np.log(np.clip(y, a_min=1e-6, a_max=None)) if use_log_transform else y
 
     if "随机森林" in model_name:
-        final_m = RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_split=2, random_state=42)
+        final_m = RandomForestRegressor(n_estimators=30, max_depth=3, min_samples_split=2, n_jobs=-1, random_state=42)
     elif "Lasso" in model_name:
         final_m = LassoCV(cv=min(3, n_samples), random_state=42)
     elif "岭回归" in model_name:
@@ -369,7 +371,7 @@ with tab4:
 
     final_m.fit(X_full, y_full_fit)
 
-    # 动态输入表单（支持中文特征标签）
+    # 动态输入表单
     input_cols = st.columns(3)
     user_inputs = {}
     for i, col in enumerate(selected_features):
