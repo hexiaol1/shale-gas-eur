@@ -238,15 +238,31 @@ with tab1:
     st.markdown("---")
     st.subheader("1.4 单特征与 EUR 散点拟合分布")
     feat_to_plot = st.selectbox("选择要与 EUR 对比分析的地质特征", options=selected_features)
+    
+    # 原生绘制散点
     fig_single = px.scatter(
         df_clean,
         x=feat_to_plot,
         y=target_col,
-        trendline="ols",
-        trendline_color_override="red",
         hover_data=[id_col],
         title=f"{feat_to_plot} 与 {target_col} 线性拟合关系"
     )
+    
+    # 使用 numpy polyfit 原生拟合趋势线，免去 statsmodels 外部依赖
+    x_vals = df_clean[feat_to_plot].values
+    y_vals = df_clean[target_col].values
+    if len(x_vals) >= 2 and np.std(x_vals) > 0:
+        slope, intercept = np.polyfit(x_vals, y_vals, 1)
+        x_line = np.linspace(np.min(x_vals), np.max(x_vals), 50)
+        y_line = slope * x_line + intercept
+        fig_single.add_trace(go.Scatter(
+            x=x_line,
+            y=y_line,
+            mode='lines',
+            name=f'线性趋势 (斜率 k={slope:.3f})',
+            line=dict(color='red', dash='dash')
+        ))
+
     fig_single.update_layout(height=400)
     st.plotly_chart(fig_single, use_container_width=True)
 
