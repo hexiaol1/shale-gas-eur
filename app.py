@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import RidgeCV, LassoCV, ElasticNetCV
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -18,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (中文与小样本强化版)")
-st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换与降维算法。")
+st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换、主成分降维与随机森林等多种算法。")
 
 # ----------------- 侧边栏：文件上传与参数选择 -----------------
 with st.sidebar:
@@ -55,11 +56,8 @@ with st.sidebar:
     # 智能处理中文空值符号（如 "/"、"--"、"无"），并尝试将可转为数值的列转回数值型
     for col in df.columns:
         if df[col].dtype == object:
-            # 替换常见中文空字符
             cleaned_col = df[col].replace(['/', '--', '-', '无', '未测', 'null', 'None', ' '], np.nan)
-            # 尝试强制转换为浮点数
             numeric_col = pd.to_numeric(cleaned_col, errors='coerce')
-            # 若转换后有效数值超过 40%，认定该列为被污染的数值列
             if numeric_col.notna().sum() > 0.4 * len(df):
                 df[col] = numeric_col
 
@@ -172,8 +170,9 @@ with tab2:
     
     with col_algo:
         model_name = st.selectbox(
-            "选择适合少井的回归算法",
+            "选择回归算法",
             [
+                "随机森林回归 (Random Forest - 树集成抗噪)",
                 "Lasso 回归 (强稀疏降维，适合小样本冗余特征)",
                 "岭回归 (RidgeCV - 抗多重共线性稳定型)",
                 "弹性网络 (ElasticNetCV - 平衡综合型)",
@@ -181,12 +180,14 @@ with tab2:
             ]
         )
     with col_info:
-        if "Lasso" in model_name:
+        if "随机森林" in model_name:
+            st.info("📌 **随机森林机制**：通过构建多棵受约束决策树进行投票平均，具备较强的抗噪和非线性拟合能力。已针对小样本限制最大树深，防止过拟合。")
+        elif "Lasso" in model_name:
             st.info("📌 **Lasso 机制**：加入 L1 正则化惩罚，会自动将冗余和共线性特征的权重压缩至 0，防止过拟合。")
         elif "岭回归" in model_name:
             st.info("📌 **岭回归机制**：加入 L2 正则化惩罚，在特征高度共线时能保持模型权重稳定。")
         elif "支持向量回归" in model_name:
-            st.info("📌 **SVR 机制**：基于结构风险最小化，在样本极少时泛化能力通常优于传统树模型。")
+            st.info("📌 **SVR 机制**：基于结构风险最小化，在样本极少时泛化能力通常优于无约束深层模型。")
         else:
             st.info("📌 **弹性网络**：兼顾 L1 特征选择与 L2 协方差稳定。")
 
@@ -223,7 +224,10 @@ with tab2:
 
         # 4. 模型配置
         inner_cv = min(3, len(X_tr))
-        if "Lasso" in model_name:
+        if "随机森林" in model_name:
+            # max_depth 控制在 3，min_samples_split 控制在 2，避免极小样本下树完全过拟合叶节点
+            m = RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_split=2, random_state=42)
+        elif "Lasso" in model_name:
             m = LassoCV(cv=inner_cv, random_state=42)
         elif "岭回归" in model_name:
             m = RidgeCV()
@@ -352,7 +356,9 @@ with tab4:
 
     y_full_fit = np.log(np.clip(y, a_min=1e-6, a_max=None)) if use_log_transform else y
 
-    if "Lasso" in model_name:
+    if "随机森林" in model_name:
+        final_m = RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_split=2, random_state=42)
+    elif "Lasso" in model_name:
         final_m = LassoCV(cv=min(3, n_samples), random_state=42)
     elif "岭回归" in model_name:
         final_m = RidgeCV()
