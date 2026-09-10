@@ -3,23 +3,22 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.linear_model import RidgeCV, LassoCV, ElasticNetCV
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import LeaveOneOut, KFold
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 st.set_page_config(
-    page_title="油气井 EUR 小样本高精度预测与符合率检验系统",
+    page_title="油气井 EUR 数据增强与超参数优化系统",
     page_icon="⛏️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (中文与小样本强化版)")
-st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换、主成分降维与轻量加速算法。")
+st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (数据增强与超参调优版)")
+st.caption("针对少井工况：去除 PCA，引入『地质特征数据增强』与『模型超参数动态微调』突破符合率瓶颈。")
 
 # ----------------- 侧边栏：文件上传与参数选择 -----------------
 with st.sidebar:
@@ -41,7 +40,7 @@ with st.sidebar:
                 except UnicodeDecodeError:
                     continue
             if df is None:
-                st.error("CSV 编码格式解析失败，请尝试在 Excel 中另存为 xlsx 后上传。")
+                st.error("CSV 编码格式解析失败，请在 Excel 中另存为 xlsx 后上传。")
                 st.stop()
         else:
             df = pd.read_excel(uploaded_file)
@@ -49,10 +48,8 @@ with st.sidebar:
         st.error(f"文件读取失败: {e}")
         st.stop()
 
-    # 清洗中文列名中的不可见字符与空格
     df.columns = [str(c).strip().replace('\n', '').replace('\r', '') for c in df.columns]
 
-    # 智能处理中文空值符号（如 "/"、"--"、"无"），并尝试将可转为数值的列转回数值型
     for col in df.columns:
         if df[col].dtype == object:
             cleaned_col = df[col].replace(['/', '--', '-', '无', '未测', 'null', 'None', ' '], np.nan)
@@ -63,7 +60,7 @@ with st.sidebar:
     st.success(f"成功载入 {len(df)} 行数据")
     
     st.markdown("---")
-    st.header("🎯 2. 列定义")
+    st.header("🎯 2. 字段映射")
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     all_cols = df.columns.tolist()
 
@@ -88,27 +85,74 @@ with st.sidebar:
     selected_features = st.multiselect("参与建模的地质/工程特征", options=available_features, default=available_features)
 
     st.markdown("---")
-    st.header("⚙️ 3. 建模优化与验证")
+    st.header("🧪 3. 数据增强与物理变换")
     
     use_log_transform = st.checkbox(
         "启用目标值对数变换 (Log-Transform)", 
         value=True, 
-        help="油气产能呈偏态分布，将 EUR 取对数后再拟合，可大幅降低极端高产井拉垮低产井误差的问题。"
+        help="推荐开启：油气产能常呈对数正态分布，取对数后拟合可抑制大井误差绑架整体模型。"
     )
     
-    use_pca = st.checkbox(
-        "启用特征主成分降维 (PCA)", 
-        value=(len(selected_features) > 4 and len(df) < 30),
-        help="样本数极少时，输入特征过多会导致维数灾难。PCA 可将多个高共线性参数压缩为少数综合指标。"
+    use_augmentation = st.checkbox(
+        "启用训练集数据增强 (Data Augmentation)", 
+        value=True, 
+        help="根据测井仪器 $2\%-5\%$ 测量误差生成扰动合成样本，大幅扩充小样本训练集容量。"
     )
     
-    pca_n_components = 2
-    if use_pca:
-        max_c = min(len(selected_features), max(1, len(df) - 2))
-        pca_n_components = st.slider("PCA 主成分保留数", min_value=1, max_value=max(1, max_c), value=min(2, max_c))
+    if use_augmentation:
+        aug_ratio = st.slider("数据倍增倍数 (合成样本/原始样本)", min_value=1, max_value=8, value=3, step=1)
+        noise_level = st.slider("特征扰动标准差比例 (%)", min_value=1, max_value=8, value=3, step=1) / 100.0
+    else:
+        aug_ratio = 0
+        noise_level = 0.0
 
-    cv_method = st.radio("交叉验证方式", ["留一交叉验证 (LOOCV - 小样本必备)", "K折交叉验证 (5-Fold)"])
-    error_threshold = st.slider("合格符合率相对误差容限 (±%)", min_value=5, max_value=50, value=25, step=5) / 100.0
+    st.markdown("---")
+    st.header("🎛️ 4. 模型选择与超参数调节")
+    
+    model_name = st.selectbox(
+        "选择回归预测模型",
+        [
+            "随机森林回归 (Random Forest)",
+            "Lasso 回归 (L1 稀疏约束)",
+            "岭回归 (Ridge - L2 抗共线性)",
+            "支持向量回归 (SVR - 核函数非线性映射)",
+            "弹性网络 (ElasticNet - L1+L2 混合)"
+        ]
+    )
+    
+    # 动态超参数面板
+    hyperparams = {}
+    if "随机森林" in model_name:
+        st.markdown("**随机森林超参数配置**")
+        hyperparams['n_estimators'] = st.slider("决策树数量 (n_estimators)", 10, 100, 30, 5)
+        hyperparams['max_depth'] = st.slider("最大树深 (max_depth)", 1, 6, 3, 1, help="小样本建议 <= 3，防止强行拟合噪声")
+        hyperparams['min_samples_split'] = st.slider("节点分裂最小样本数", 2, 6, 2, 1)
+    elif "Lasso" in model_name:
+        st.markdown("**Lasso 超参数配置**")
+        alpha_exp = st.slider("正则化强度 log10(alpha)", -4.0, 1.0, -1.5, 0.25)
+        hyperparams['alpha'] = 10 ** alpha_exp
+        st.caption(f"当前 alpha = {hyperparams['alpha']:.5f}")
+    elif "岭回归" in model_name:
+        st.markdown("**岭回归超参数配置**")
+        alpha_exp = st.slider("L2 正则强度 log10(alpha)", -3.0, 3.0, 0.5, 0.25)
+        hyperparams['alpha'] = 10 ** alpha_exp
+        st.caption(f"当前 alpha = {hyperparams['alpha']:.5f}")
+    elif "支持向量回归" in model_name:
+        st.markdown("**SVR 超参数配置**")
+        c_exp = st.slider("惩罚因子 log10(C)", -1.0, 3.0, 1.0, 0.5)
+        hyperparams['C'] = 10 ** c_exp
+        hyperparams['epsilon'] = st.slider("容忍误差裕度 (epsilon)", 0.01, 0.30, 0.05, 0.01)
+        hyperparams['kernel'] = st.selectbox("核函数", ["rbf", "linear", "poly"], index=0)
+    else:
+        st.markdown("**弹性网络超参数配置**")
+        alpha_exp = st.slider("总正则强度 log10(alpha)", -3.0, 1.0, -1.5, 0.25)
+        hyperparams['alpha'] = 10 ** alpha_exp
+        hyperparams['l1_ratio'] = st.slider("L1 比例权重 (l1_ratio)", 0.05, 0.95, 0.5, 0.05)
+
+    st.markdown("---")
+    st.header("📊 5. 验证与符合率阈值")
+    cv_method = st.radio("交叉验证方式", ["留一交叉验证 (LOOCV - 小样本推荐)", "K折交叉验证 (5-Fold)"])
+    error_threshold = st.slider("合格相对误差容限 (±%)", min_value=5, max_value=50, value=25, step=5) / 100.0
 
 if len(selected_features) < 1:
     st.warning("⚠️ 请在侧边栏至少勾选 1 个特征参数！")
@@ -121,7 +165,7 @@ if len(df_clean) < len(df):
     st.warning(f"注意：排除了包含空缺值的 {len(df) - len(df_clean)} 口井，当前可用建模样本数: {len(df_clean)}")
 
 if len(df_clean) < 3:
-    st.error("有效样本量不足 3 个，无法进行建模训练与交叉验证。")
+    st.error("有效样本量不足 3 个，无法进行交叉验证。")
     st.stop()
 
 X = df_clean[selected_features].values
@@ -129,10 +173,71 @@ y = df_clean[target_col].values
 well_ids = df_clean[id_col].astype(str).values
 n_samples = len(df_clean)
 
-# ----------------- 选项卡 -----------------
+# ----------------- 数据增强核心函数 -----------------
+def augment_training_data(X_train, y_train, multiplier=2, noise=0.03):
+    """
+    仅在训练集内部进行小样本高斯微扰与 Mixup 插值合成
+    """
+    if multiplier <= 0 or noise <= 0:
+        return X_train, y_train
+        
+    augmented_X = [X_train]
+    augmented_y = [y_train]
+    
+    n_train = len(X_train)
+    std_features = np.std(X_train, axis=0)
+    std_features[std_features == 0] = 1.0  # 防止除以零
+    
+    for _ in range(multiplier):
+        # 1. 高斯噪声微扰增强（模拟仪器解释偏差）
+        jitter = np.random.normal(0, noise, size=X_train.shape) * std_features
+        X_jittered = X_train + jitter
+        y_jittered = y_train * np.random.normal(1.0, noise * 0.5, size=y_train.shape)
+        
+        # 2. 局部 Mixup 连续插值增强（模拟邻井过渡层）
+        perm = np.random.permutation(n_train)
+        lam = np.random.beta(2.0, 2.0, size=(n_train, 1))
+        lam = np.clip(lam, 0.35, 0.65)  # 避免偏激外推
+        X_mix = lam * X_train + (1 - lam) * X_train[perm]
+        y_mix = lam.ravel() * y_train + (1 - lam.ravel()) * y_train[perm]
+        
+        augmented_X.extend([X_jittered, X_mix])
+        augmented_y.extend([y_jittered, y_mix])
+        
+    return np.vstack(augmented_X), np.concatenate(augmented_y)
+
+# ----------------- 模型工厂函数 -----------------
+def create_model(model_name, hyperparams):
+    if "随机森林" in model_name:
+        return RandomForestRegressor(
+            n_estimators=hyperparams['n_estimators'],
+            max_depth=hyperparams['max_depth'],
+            min_samples_split=hyperparams['min_samples_split'],
+            n_jobs=-1,
+            random_state=42
+        )
+    elif "Lasso" in model_name:
+        return Lasso(alpha=hyperparams['alpha'], random_state=42, max_iter=5000)
+    elif "岭回归" in model_name:
+        return Ridge(alpha=hyperparams['alpha'], random_state=42)
+    elif "支持向量回归" in model_name:
+        return SVR(
+            C=hyperparams['C'],
+            epsilon=hyperparams['epsilon'],
+            kernel=hyperparams['kernel']
+        )
+    else:
+        return ElasticNet(
+            alpha=hyperparams['alpha'],
+            l1_ratio=hyperparams['l1_ratio'],
+            random_state=42,
+            max_iter=5000
+        )
+
+# ----------------- 页面主 Tabs -----------------
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 数据检查与相关性", 
-    "🚀 小样本自适应建模与预测", 
+    "🚀 增强建模与超参调优验证", 
     "🎯 符合率与误差诊断", 
     "🔮 单井新参数估算"
 ])
@@ -159,35 +264,11 @@ with tab1:
         fig_corr.update_layout(height=420, margin=dict(l=10, r=10, t=25, b=10))
         st.plotly_chart(fig_corr, use_container_width=True)
 
-# ----------------- TAB 2: 模型训练与预测 -----------------
+# ----------------- TAB 2: 增强建模与预测 -----------------
 with tab2:
-    st.subheader("2.1 算法选择")
-    col_algo, col_info = st.columns([1, 2])
-    
-    with col_algo:
-        model_name = st.selectbox(
-            "选择回归算法",
-            [
-                "随机森林回归 (Random Forest - 轻量加速版)",
-                "Lasso 回归 (强稀疏降维，适合小样本冗余特征)",
-                "岭回归 (RidgeCV - 抗多重共线性稳定型)",
-                "弹性网络 (ElasticNetCV - 平衡综合型)",
-                "支持向量回归 (SVR - RBF 核非线性映射)"
-            ]
-        )
-    with col_info:
-        if "随机森林" in model_name:
-            st.info("📌 **随机森林机制**：已配置全核多线程并行（n_jobs=-1）与轻量级树结构，秒级计算且抗过拟合。")
-        elif "Lasso" in model_name:
-            st.info("📌 **Lasso 机制**：加入 L1 正则化惩罚，会自动将冗余和共线性特征的权重压缩至 0，防止过拟合。")
-        elif "岭回归" in model_name:
-            st.info("📌 **岭回归机制**：加入 L2 正则化惩罚，在特征高度共线时能保持模型权重稳定。")
-        elif "支持向量回归" in model_name:
-            st.info("📌 **SVR 机制**：基于结构风险最小化，在样本极少时泛化能力通常优于无约束深层模型。")
-        else:
-            st.info("📌 **弹性网络**：兼顾 L1 特征选择与 L2 协方差稳定。")
+    st.subheader("2.1 交叉验证评估机制")
+    st.write(f"当前方案：数据增强 = **{'已开启 (×' + str(aug_ratio*2 + 1) + '倍扩展)' if use_augmentation else '已关闭'}**，目标对数变换 = **{'已开启' if use_log_transform else '已关闭'}**")
 
-    # 配置交叉验证
     if cv_method.startswith("留一"):
         cv_splitter = LeaveOneOut()
     else:
@@ -196,60 +277,41 @@ with tab2:
 
     y_preds = np.zeros(n_samples)
 
-    # 交叉验证主循环
+    # 交叉验证循环
     for train_idx, test_idx in cv_splitter.split(X):
         X_tr, X_te = X[train_idx], X[test_idx]
         y_tr, y_te = y[train_idx], y[test_idx]
 
-        # 1. 目标值对数变换
-        if use_log_transform:
-            y_tr_fit = np.log(np.clip(y_tr, a_min=1e-6, a_max=None))
+        # 1. 仅在训练折做数据增强（严防泄露）
+        if use_augmentation:
+            X_tr_fit, y_tr_fit = augment_training_data(X_tr, y_tr, multiplier=aug_ratio, noise=noise_level)
         else:
-            y_tr_fit = y_tr
+            X_tr_fit, y_tr_fit = X_tr, y_tr
 
-        # 2. 特征标准化
+        # 2. 目标对数变换
+        if use_log_transform:
+            y_tr_fit = np.log(np.clip(y_tr_fit, a_min=1e-6, a_max=None))
+
+        # 3. 特征标准化（在增强后的训练集上 fit）
         scaler = StandardScaler()
-        X_tr_sc = scaler.fit_transform(X_tr)
+        X_tr_sc = scaler.fit_transform(X_tr_fit)
         X_te_sc = scaler.transform(X_te)
 
-        # 3. PCA 降维 (可选)
-        if use_pca:
-            pca = PCA(n_components=pca_n_components)
-            X_tr_sc = pca.fit_transform(X_tr_sc)
-            X_te_sc = pca.transform(X_te_sc)
-
-        # 4. 模型配置（随机森林已加速优化）
-        inner_cv = min(3, len(X_tr))
-        if "随机森林" in model_name:
-            m = RandomForestRegressor(
-                n_estimators=30, 
-                max_depth=3, 
-                min_samples_split=2, 
-                n_jobs=-1, 
-                random_state=42
-            )
-        elif "Lasso" in model_name:
-            m = LassoCV(cv=inner_cv, random_state=42)
-        elif "岭回归" in model_name:
-            m = RidgeCV()
-        elif "弹性网络" in model_name:
-            m = ElasticNetCV(cv=inner_cv, random_state=42)
-        else:
-            m = SVR(kernel="rbf", C=5.0, epsilon=0.05)
-
+        # 4. 根据当前侧边栏超参实例化并拟合
+        m = create_model(model_name, hyperparams)
         m.fit(X_tr_sc, y_tr_fit)
         pred_sub = m.predict(X_te_sc)
 
-        # 反变换
+        # 5. 反变换
         if use_log_transform:
             pred_sub = np.exp(pred_sub)
 
         y_preds[test_idx] = pred_sub
 
-    # 截断非物理负值
+    # 截断非物理负数
     y_preds = np.clip(y_preds, a_min=1e-4, a_max=None)
 
-    # 指标计算
+    # 计算指标
     r2 = r2_score(y, y_preds)
     rmse = np.sqrt(mean_squared_error(y, y_preds))
     mae = mean_absolute_error(y, y_preds)
@@ -258,14 +320,13 @@ with tab2:
     accuracy_rate = np.mean(rel_errors <= error_threshold) * 100.0
 
     st.markdown("---")
-    st.write("##### 盲测指标概览")
+    st.write("##### 盲测指标表现 (随侧边栏超参调节实时变动)")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("决定系数 (R²)", f"{r2:.3f}", help="越接近 1 越好；小样本盲测出现负值说明样本间离散度极大")
+    m1.metric("决定系数 (R²)", f"{r2:.3f}", help="越接近 1 越好")
     m2.metric("均方根误差 (RMSE)", f"{rmse:.3f}")
     m3.metric("平均相对误差 (MAPE)", f"{mape:.1f}%")
     m4.metric(f"符合率 (≤±{int(error_threshold*100)}%)", f"{accuracy_rate:.1f}%")
 
-    # 实测-预测对比表
     cross_df = pd.DataFrame({
         "井号": well_ids,
         "实测 EUR": y,
@@ -274,7 +335,7 @@ with tab2:
         "检验结论": ["合格" if e <= error_threshold else "超标" for e in rel_errors]
     })
 
-    # 绘制交会散点图（已剔除散点上文字显示）
+    # 交会图（无散点文本遮挡）
     max_v = max(np.max(y), np.max(y_preds)) * 1.15
     fig_eval = go.Figure()
     fig_eval.add_trace(go.Scatter(x=[0, max_v], y=[0, max_v], mode='lines', name='1:1 理想线', line=dict(color='gray', dash='dash')))
@@ -286,16 +347,16 @@ with tab2:
         fig_eval.add_trace(go.Scatter(
             x=sub_d["实测 EUR"],
             y=sub_d["预测 EUR"],
-            mode='markers',  # 仅保留散点标记，不带文字标签
+            mode='markers',
             name=f"{res}井位",
             marker=dict(size=10, color=c, opacity=0.85),
             customdata=sub_d[["井号", "相对误差(%)"]],
-            hovertemplate="<b>井号: %{customdata[0]}</b><br>实测 EUR: %{x:.4f}<br>预测 EUR: %{y:.4f}<br>相对误差: %{customdata[1]:.2f}%<extra></extra>"
+            hovertemplate="<b>井号: %{customdata[0]}</b><br>实测: %{x:.4f}<br>预测: %{y:.4f}<br>相对误差: %{customdata[1]:.2f}%<extra></extra>"
         ))
 
     fig_eval.update_layout(
         xaxis_title="实际 EUR",
-        yaxis_title="交叉验证预测 EUR",
+        yaxis_title="盲测预测 EUR",
         height=520,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
@@ -343,35 +404,25 @@ with tab3:
 
 # ----------------- TAB 4: 单井现场试算 -----------------
 with tab4:
-    st.subheader("4.1 现场新井测井参数快速反演 EUR")
-    st.write("利用全量数据与当前优化方案（对数变换/PCA降维）进行参数推演：")
+    st.subheader("4.1 现场新井参数实时推演")
+    st.write("基于当前最佳超参数配置及增强全样本训练出的统一模型进行试算：")
 
     # 全量拟合
+    if use_augmentation:
+        X_full_fit, y_full_fit = augment_training_data(X, y, multiplier=aug_ratio, noise=noise_level)
+    else:
+        X_full_fit, y_full_fit = X, y
+
+    if use_log_transform:
+        y_full_fit = np.log(np.clip(y_full_fit, a_min=1e-6, a_max=None))
+
     final_scaler = StandardScaler()
-    X_full = final_scaler.fit_transform(X)
-    
-    if use_pca:
-        final_pca = PCA(n_components=pca_n_components)
-        X_full = final_pca.fit_transform(X_full)
-    else:
-        final_pca = None
+    X_full_sc = final_scaler.fit_transform(X_full_fit)
 
-    y_full_fit = np.log(np.clip(y, a_min=1e-6, a_max=None)) if use_log_transform else y
+    final_m = create_model(model_name, hyperparams)
+    final_m.fit(X_full_sc, y_full_fit)
 
-    if "随机森林" in model_name:
-        final_m = RandomForestRegressor(n_estimators=30, max_depth=3, min_samples_split=2, n_jobs=-1, random_state=42)
-    elif "Lasso" in model_name:
-        final_m = LassoCV(cv=min(3, n_samples), random_state=42)
-    elif "岭回归" in model_name:
-        final_m = RidgeCV()
-    elif "弹性网络" in model_name:
-        final_m = ElasticNetCV(cv=min(3, n_samples), random_state=42)
-    else:
-        final_m = SVR(kernel="rbf", C=5.0, epsilon=0.05)
-
-    final_m.fit(X_full, y_full_fit)
-
-    # 动态输入表单
+    # 动态输入面板
     input_cols = st.columns(3)
     user_inputs = {}
     for i, col in enumerate(selected_features):
@@ -382,11 +433,8 @@ with tab4:
             step_val = (max_val - min_val) / 100.0 if max_val != min_val else 0.01
             user_inputs[col] = st.number_input(f"{col}", value=round(mean_val, 2), step=round(step_val, 3), format="%.2f")
 
-    # 实时推演
     vec = np.array([[user_inputs[c] for c in selected_features]])
     vec_scaled = final_scaler.transform(vec)
-    if final_pca:
-        vec_scaled = final_pca.transform(vec_scaled)
 
     pred_res = final_m.predict(vec_scaled)[0]
     if use_log_transform:
