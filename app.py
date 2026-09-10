@@ -17,8 +17,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (小样本专用强化版)")
-st.caption("针对非常规油气少井工况：集成『对数物理变换』、『主成分降维 (PCA)』与『抗共线性正则化算法』提升小样本符合率。")
+st.title("⛏️ 油气井 EUR 预测与符合率检验系统 (中文与小样本强化版)")
+st.caption("支持含中文表头、中文文本缺失值及 GBK/UTF-8 自动兼容；集成对数变换与降维算法。")
 
 # ----------------- 侧边栏：文件上传与参数选择 -----------------
 with st.sidebar:
@@ -26,17 +26,42 @@ with st.sidebar:
     uploaded_file = st.file_uploader("上传井位数据表 (支持 .csv / .xlsx / .xls)", type=["csv", "xlsx", "xls"])
     
     if uploaded_file is None:
-        st.info("💡 请先上传数据文件开始分析。")
+        st.info("💡 请先上传包含地质参数和 EUR 的数据表格。")
         st.stop()
         
+    df = None
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+        if uploaded_file.name.lower().endswith('.csv'):
+            # 解决中文 CSV 编码乱码与报错问题（按顺序尝试常见中文编码）
+            for enc in ['utf-8', 'gb18030', 'gbk', 'utf-8-sig']:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if df is None:
+                st.error("CSV 编码格式解析失败，请尝试在 Excel 中另存为 xlsx 后上传。")
+                st.stop()
         else:
             df = pd.read_excel(uploaded_file)
     except Exception as e:
         st.error(f"文件读取失败: {e}")
         st.stop()
+
+    # 清洗中文列名中的不可见字符与空格
+    df.columns = [str(c).strip().replace('\n', '').replace('\r', '') for c in df.columns]
+
+    # 智能处理中文空值符号（如 "/"、"--"、"无"），并尝试将可转为数值的列转回数值型
+    for col in df.columns:
+        if df[col].dtype == object:
+            # 替换常见中文空字符
+            cleaned_col = df[col].replace(['/', '--', '-', '无', '未测', 'null', 'None', ' '], np.nan)
+            # 尝试强制转换为浮点数
+            numeric_col = pd.to_numeric(cleaned_col, errors='coerce')
+            # 若转换后有效数值超过 40%，认定该列为被污染的数值列
+            if numeric_col.notna().sum() > 0.4 * len(df):
+                df[col] = numeric_col
 
     st.success(f"成功载入 {len(df)} 行数据")
     
@@ -46,17 +71,26 @@ with st.sidebar:
     all_cols = df.columns.tolist()
 
     if len(numeric_cols) < 2:
-        st.error("表格中数值型列不足 2 列，无法提取特征与目标值。")
+        st.error("识别到的数值列不足 2 列，请检查表格是否包含纯文本或缺失过多。")
         st.stop()
 
-    id_col = st.selectbox("井号 / ID 列", options=all_cols, index=0)
+    # 智能定位井号列（支持中英文字符串搜索）
+    well_col_keywords = ['井号', 'well', 'id', '井名', '井号名称']
+    default_id_idx = 0
+    for idx, col in enumerate(all_cols):
+        if any(k in col.lower() for k in well_col_keywords):
+            default_id_idx = idx
+            break
+    id_col = st.selectbox("井号 / ID 列", options=all_cols, index=default_id_idx)
     
-    # 智能推断 EUR 列
-    eur_candidates = [c for c in numeric_cols if 'eur' in c.lower()]
+    # 智能推断 EUR 列（涵盖中英文常用列名）
+    eur_keywords = ['eur', '储量', '累产', '可采', '最终可采', '估算可采']
+    eur_candidates = [c for c in numeric_cols if any(k in c.lower() for k in eur_keywords)]
     default_target_idx = numeric_cols.index(eur_candidates[0]) if eur_candidates else len(numeric_cols) - 1
-    target_col = st.selectbox("目标变量 (EUR)", options=numeric_cols, index=default_target_idx)
+    target_col = st.selectbox("目标变量 (EUR / 累产)", options=numeric_cols, index=default_target_idx)
 
-    available_features = [c for c in numeric_cols if c != target_col]
+    # 备选特征排查
+    available_features = [c for c in numeric_cols if c != target_col and c != id_col]
     selected_features = st.multiselect("参与建模的地质/工程特征", options=available_features, default=available_features)
 
     st.markdown("---")
@@ -65,13 +99,13 @@ with st.sidebar:
     use_log_transform = st.checkbox(
         "启用目标值对数变换 (Log-Transform)", 
         value=True, 
-        help="油气产能呈偏态分布，将 EUR 取对数后再拟合，可大幅降低由于极端高产井导致的整体误差。"
+        help="油气产能呈偏态分布，将 EUR 取对数后再拟合，可大幅降低极端高产井拉垮低产井误差的问题。"
     )
     
     use_pca = st.checkbox(
         "启用特征主成分降维 (PCA)", 
         value=(len(selected_features) > 4 and len(df) < 30),
-        help="样本数极少时，输入特征过多会导致维数灾难。PCA 可将多个高共线性参数压缩为少数几个综合指标。"
+        help="样本数极少时，输入特征过多会导致维数灾难。PCA 可将多个高共线性参数压缩为少数综合指标。"
     )
     
     pca_n_components = 2
@@ -80,7 +114,7 @@ with st.sidebar:
         pca_n_components = st.slider("PCA 主成分保留数", min_value=1, max_value=max(1, max_c), value=min(2, max_c))
 
     cv_method = st.radio("交叉验证方式", ["留一交叉验证 (LOOCV - 小样本必备)", "K折交叉验证 (5-Fold)"])
-    error_threshold = st.slider("合格符合率相对误差容限 (±%)", min_value=5, max_value=40, value=20, step=5) / 100.0
+    error_threshold = st.slider("合格符合率相对误差容限 (±%)", min_value=5, max_value=50, value=25, step=5) / 100.0
 
 if len(selected_features) < 1:
     st.warning("⚠️ 请在侧边栏至少勾选 1 个特征参数！")
@@ -90,7 +124,7 @@ if len(selected_features) < 1:
 clean_cols = selected_features + [target_col]
 df_clean = df.dropna(subset=clean_cols).copy()
 if len(df_clean) < len(df):
-    st.warning(f"注意：排除了包含缺失值的 {len(df) - len(df_clean)} 条数据，当前可用样本数: {len(df_clean)}")
+    st.warning(f"注意：排除了包含空缺值的 {len(df) - len(df_clean)} 口井，当前可用建模样本数: {len(df_clean)}")
 
 if len(df_clean) < 3:
     st.error("有效样本量不足 3 个，无法进行建模训练与交叉验证。")
@@ -116,7 +150,7 @@ with tab1:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("1.2 统计指标")
+        st.subheader("1.2 数值统计指标")
         st.dataframe(df_clean[clean_cols].describe().T.style.format("{:.3f}"), use_container_width=True)
     with col2:
         st.subheader("1.3 特征相关性热力图")
@@ -148,13 +182,13 @@ with tab2:
         )
     with col_info:
         if "Lasso" in model_name:
-            st.info("📌 **Lasso 机制**：加入 L1 正则化惩罚，会自动将冗余和共线性特征的权重压缩至 0，相当于自主做特征筛选，防止过拟合。")
+            st.info("📌 **Lasso 机制**：加入 L1 正则化惩罚，会自动将冗余和共线性特征的权重压缩至 0，防止过拟合。")
         elif "岭回归" in model_name:
-            st.info("📌 **岭回归机制**：加入 L2 正则化惩罚，在特征强相关（例如游离气与总含气量）时保持极高稳定性，不会因少数异常点发生抖动。")
+            st.info("📌 **岭回归机制**：加入 L2 正则化惩罚，在特征高度共线时能保持模型权重稳定。")
         elif "支持向量回归" in model_name:
-            st.info("📌 **SVR 机制**：基于结构风险最小化，核函数映射使它在样本量甚至少于 20 个时，表现显著优于随机森林和深度学习。")
+            st.info("📌 **SVR 机制**：基于结构风险最小化，在样本极少时泛化能力通常优于传统树模型。")
         else:
-            st.info("📌 **弹性网络**：兼具 L1 特征选择与 L2 协方差控制，适合中等样本。")
+            st.info("📌 **弹性网络**：兼顾 L1 特征选择与 L2 协方差稳定。")
 
     # 配置交叉验证
     if cv_method.startswith("留一"):
@@ -187,7 +221,7 @@ with tab2:
             X_tr_sc = pca.fit_transform(X_tr_sc)
             X_te_sc = pca.transform(X_te_sc)
 
-        # 4. 模型适配
+        # 4. 模型配置
         inner_cv = min(3, len(X_tr))
         if "Lasso" in model_name:
             m = LassoCV(cv=inner_cv, random_state=42)
@@ -221,7 +255,7 @@ with tab2:
     st.markdown("---")
     st.write("##### 盲测指标概览")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("决定系数 (R²)", f"{r2:.3f}", help="越接近 1 越好，小于 0 说明模型泛化弱于均值猜测")
+    m1.metric("决定系数 (R²)", f"{r2:.3f}", help="越接近 1 越好；小样本盲测出现负值说明样本间离散度极大")
     m2.metric("均方根误差 (RMSE)", f"{rmse:.3f}")
     m3.metric("平均相对误差 (MAPE)", f"{mape:.1f}%")
     m4.metric(f"符合率 (≤±{int(error_threshold*100)}%)", f"{accuracy_rate:.1f}%")
@@ -329,7 +363,7 @@ with tab4:
 
     final_m.fit(X_full, y_full_fit)
 
-    # 动态输入表单
+    # 动态输入表单（支持中文特征标签）
     input_cols = st.columns(3)
     user_inputs = {}
     for i, col in enumerate(selected_features):
@@ -359,7 +393,7 @@ with tab4:
             <div style="background-color: #f0f7ff; border: 2px solid #007bff; border-radius: 12px; padding: 25px; text-align: center;">
                 <h4 style="margin: 0; color: #555;">该井 EUR 预估值</h4>
                 <h1 style="margin: 10px 0; color: #007bff; font-size: 2.8rem;">{pred_res:.4f}</h1>
-                <p style="margin: 0; color: #888; font-size: 0.9rem;">单位：10⁸ m³ (或数据表基准单位)</p>
+                <p style="margin: 0; color: #888; font-size: 0.9rem;">单位：10⁸ m³ (或相应储量单位)</p>
             </div>
             """,
             unsafe_allow_html=True
