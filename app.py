@@ -10,13 +10,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 st.set_page_config(
-    page_title="油气井 EUR 全局增强高符合率预测系统",
+    page_title="威远常压区页岩气井 EUR 全局增强高符合率预测系统",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("🎯 油气井 EUR 全局增强高符合率预测系统")
+st.title("🎯 威远常压区页岩气井 EUR 全局增强高符合率预测系统")
 st.caption("集成『数据质量检查与相关性诊断』、『全域地质数据增强』与『多算法高精度回判』。")
 
 # ----------------- 侧边栏：配置与参数 -----------------
